@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   BackHandler,
+  Dimensions,
   Modal,
   Pressable,
   ScrollView,
@@ -37,6 +38,10 @@ type Game = {
 
 const FIELD_WIDTH = 1200;
 const FIELD_HEIGHT = 600;
+const SCREEN_WIDTH = Dimensions.get("screen").width;
+const SCREEN_HEIGHT = Dimensions.get("screen").height;
+const EXPANDED_WINDOW_WIDTH = Math.max(SCREEN_WIDTH, SCREEN_HEIGHT);
+const EXPANDED_WINDOW_HEIGHT = Math.min(SCREEN_WIDTH, SCREEN_HEIGHT);
 
 const demoGames: Game[] = [
   {
@@ -112,7 +117,7 @@ const demoGames: Game[] = [
           x: 460,
           y: 340,
           color: "#E31837",
-          info: "High-impact tight end known for contested catches and playmaking.",
+          info: "High-impact tight end known for contested catches and playmaking \n Taylor Swift's husband.",
         },
         {
           id: "kc-3",
@@ -297,6 +302,116 @@ export default function FieldScreen() {
     [games, selectedGameId],
   );
 
+  const renderField = () => (
+    <Svg
+      width="100%"
+      height="100%"
+      viewBox={`0 0 ${FIELD_WIDTH} ${FIELD_HEIGHT}`}
+      preserveAspectRatio="xMidYMid meet"
+    >
+      <Rect width={FIELD_WIDTH} height={FIELD_HEIGHT} fill="#2E8B57" />
+      <Rect width="100" height={FIELD_HEIGHT} fill="#1b5e20" />
+      <Rect
+        x={FIELD_WIDTH - 100}
+        width="100"
+        height={FIELD_HEIGHT}
+        fill="#1b5e20"
+      />
+
+      {[...Array(12)].map((_, index) => {
+        const x = index * 100;
+        return (
+          <Line
+            key={`yard-${index}`}
+            x1={x}
+            y1={0}
+            x2={x}
+            y2={FIELD_HEIGHT}
+            stroke="rgba(255,255,255,0.35)"
+            strokeWidth="3"
+          />
+        );
+      })}
+
+      <Line
+        x1={FIELD_WIDTH / 2}
+        y1={0}
+        x2={FIELD_WIDTH / 2}
+        y2={FIELD_HEIGHT}
+        stroke="rgba(255,255,255,0.8)"
+        strokeWidth="6"
+      />
+
+      <SvgText
+        x={60}
+        y={FIELD_HEIGHT / 2}
+        fill="white"
+        fontSize="28"
+        fontWeight="700"
+        transform={`rotate(-90 60 ${FIELD_HEIGHT / 2})`}
+      >
+        {selectedGame.away.abbreviation}
+      </SvgText>
+
+      <SvgText
+        x={FIELD_WIDTH - 60}
+        y={FIELD_HEIGHT / 2}
+        fill="white"
+        fontSize="28"
+        fontWeight="700"
+        transform={`rotate(90 ${FIELD_WIDTH - 60} ${FIELD_HEIGHT / 2})`}
+      >
+        {selectedGame.home.abbreviation}
+      </SvgText>
+
+      {selectedGame.away.players.map((player) => (
+        <G key={player.id} onPress={() => setSelectedPlayer(player)}>
+          <Circle
+            cx={player.x}
+            cy={player.y}
+            r={18}
+            fill={player.color}
+            stroke="white"
+            strokeWidth="2"
+          />
+          <SvgText
+            x={player.x}
+            y={player.y + 6}
+            fill="white"
+            fontSize="14"
+            fontWeight="700"
+            textAnchor="middle"
+          >
+            {player.position}
+          </SvgText>
+        </G>
+      ))}
+
+      {selectedGame.home.players.map((player) => (
+        <G key={player.id} onPress={() => setSelectedPlayer(player)}>
+          <Circle
+            cx={player.x}
+            cy={player.y}
+            r={18}
+            fill={player.color}
+            stroke="white"
+            strokeWidth="2"
+          />
+          <SvgText
+            x={player.x}
+            y={player.y + 6}
+            fill="white"
+            fontSize="14"
+            fontWeight="700"
+            textAnchor="middle"
+          >
+            {player.position}
+          </SvgText>
+        </G>
+      ))}
+    </Svg>
+  );
+
   return (
     <View style={styles.container}>
       <View style={styles.headerPanel}>
@@ -333,117 +448,7 @@ export default function FieldScreen() {
       </View>
 
       <Pressable onPress={() => setIsFieldExpanded(true)}>
-        <View style={styles.fieldShell}>
-          <Svg
-            width="100%"
-            height="100%"
-            viewBox={`0 0 ${FIELD_WIDTH} ${FIELD_HEIGHT}`}
-            preserveAspectRatio="xMidYMid meet"
-          >
-            <Rect width={FIELD_WIDTH} height={FIELD_HEIGHT} fill="#2E8B57" />
-            <Rect width="100" height={FIELD_HEIGHT} fill="#1b5e20" />
-            <Rect
-              x={FIELD_WIDTH - 100}
-              width="100"
-              height={FIELD_HEIGHT}
-              fill="#1b5e20"
-            />
-
-            {[...Array(12)].map((_, index) => {
-              const x = index * 100;
-              return (
-                <Line
-                  key={`yard-${index}`}
-                  x1={x}
-                  y1={0}
-                  x2={x}
-                  y2={FIELD_HEIGHT}
-                  stroke="rgba(255,255,255,0.35)"
-                  strokeWidth="3"
-                />
-              );
-            })}
-
-            <Line
-              x1={FIELD_WIDTH / 2}
-              y1={0}
-              x2={FIELD_WIDTH / 2}
-              y2={FIELD_HEIGHT}
-              stroke="rgba(255,255,255,0.8)"
-              strokeWidth="6"
-            />
-
-            <SvgText
-              x={60}
-              y={FIELD_HEIGHT / 2}
-              fill="white"
-              fontSize="28"
-              fontWeight="700"
-              transform={`rotate(-90 60 ${FIELD_HEIGHT / 2})`}
-            >
-              {selectedGame.away.abbreviation}
-            </SvgText>
-
-            <SvgText
-              x={FIELD_WIDTH - 60}
-              y={FIELD_HEIGHT / 2}
-              fill="white"
-              fontSize="28"
-              fontWeight="700"
-              transform={`rotate(90 ${FIELD_WIDTH - 60} ${FIELD_HEIGHT / 2})`}
-            >
-              {selectedGame.home.abbreviation}
-            </SvgText>
-
-            {selectedGame.away.players.map((player) => (
-              <G key={player.id} onPress={() => setSelectedPlayer(player)}>
-                <Circle
-                  cx={player.x}
-                  cy={player.y}
-                  r={18}
-                  fill={player.color}
-                  stroke="white"
-                  strokeWidth="2"
-                />
-                <SvgText
-                  x={player.x}
-                  y={player.y + 6}
-                  fill="white"
-                  fontSize="14"
-                  fontWeight="700"
-                  textAnchor="middle"
-                  transform={`rotate(90 ${player.x} ${player.y})`}
-                >
-                  {player.position}
-                </SvgText>
-              </G>
-            ))}
-
-            {selectedGame.home.players.map((player) => (
-              <G key={player.id} onPress={() => setSelectedPlayer(player)}>
-                <Circle
-                  cx={player.x}
-                  cy={player.y}
-                  r={18}
-                  fill={player.color}
-                  stroke="white"
-                  strokeWidth="2"
-                />
-                <SvgText
-                  x={player.x}
-                  y={player.y + 6}
-                  fill="white"
-                  fontSize="14"
-                  fontWeight="700"
-                  textAnchor="middle"
-                  transform={`rotate(90 ${player.x} ${player.y})`}
-                >
-                  {player.position}
-                </SvgText>
-              </G>
-            ))}
-          </Svg>
-        </View>
+        <View style={styles.fieldShell}>{renderField()}</View>
       </Pressable>
 
       <View style={styles.lineupContainer}>
@@ -514,118 +519,17 @@ export default function FieldScreen() {
           style={styles.expandedFieldBackdrop}
           onPress={() => setIsFieldExpanded(false)}
         >
-          <View style={styles.expandedFieldCard}>
-            <View style={styles.expandedFieldShell}>
-              <Svg
-                width="100%"
-                height="100%"
-                viewBox={`0 0 ${FIELD_WIDTH} ${FIELD_HEIGHT}`}
-                preserveAspectRatio="xMidYMid meet"
-              >
-                <Rect width={FIELD_WIDTH} height={FIELD_HEIGHT} fill="#2E8B57" />
-                <Rect width="100" height={FIELD_HEIGHT} fill="#1b5e20" />
-                <Rect
-                  x={FIELD_WIDTH - 100}
-                  width="100"
-                  height={FIELD_HEIGHT}
-                  fill="#1b5e20"
-                />
-
-                {[...Array(12)].map((_, index) => {
-                  const x = index * 100;
-                  return (
-                    <Line
-                      key={`expanded-yard-${index}`}
-                      x1={x}
-                      y1={0}
-                      x2={x}
-                      y2={FIELD_HEIGHT}
-                      stroke="rgba(255,255,255,0.35)"
-                      strokeWidth="3"
-                    />
-                  );
-                })}
-
-                <Line
-                  x1={FIELD_WIDTH / 2}
-                  y1={0}
-                  x2={FIELD_WIDTH / 2}
-                  y2={FIELD_HEIGHT}
-                  stroke="rgba(255,255,255,0.8)"
-                  strokeWidth="6"
-                />
-
-                <SvgText
-                  x={60}
-                  y={FIELD_HEIGHT / 2}
-                  fill="white"
-                  fontSize="28"
-                  fontWeight="700"
-                  transform={`rotate(-90 60 ${FIELD_HEIGHT / 2})`}
-                >
-                  {selectedGame.away.abbreviation}
-                </SvgText>
-
-                <SvgText
-                  x={FIELD_WIDTH - 60}
-                  y={FIELD_HEIGHT / 2}
-                  fill="white"
-                  fontSize="28"
-                  fontWeight="700"
-                  transform={`rotate(90 ${FIELD_WIDTH - 60} ${FIELD_HEIGHT / 2})`}
-                >
-                  {selectedGame.home.abbreviation}
-                </SvgText>
-
-                {selectedGame.away.players.map((player) => (
-                  <G key={player.id} onPress={() => setSelectedPlayer(player)}>
-                    <Circle
-                      cx={player.x}
-                      cy={player.y}
-                      r={18}
-                      fill={player.color}
-                      stroke="white"
-                      strokeWidth="2"
-                    />
-                    <SvgText
-                      x={player.x}
-                      y={player.y + 6}
-                      fill="white"
-                      fontSize="14"
-                      fontWeight="700"
-                      textAnchor="middle"
-                      transform={`rotate(90 ${player.x} ${player.y})`}
-                    >
-                      {player.position}
-                    </SvgText>
-                  </G>
-                ))}
-
-                {selectedGame.home.players.map((player) => (
-                  <G key={player.id} onPress={() => setSelectedPlayer(player)}>
-                    <Circle
-                      cx={player.x}
-                      cy={player.y}
-                      r={18}
-                      fill={player.color}
-                      stroke="white"
-                      strokeWidth="2"
-                    />
-                    <SvgText
-                      x={player.x}
-                      y={player.y + 6}
-                      fill="white"
-                      fontSize="14"
-                      fontWeight="700"
-                      textAnchor="middle"
-                      transform={`rotate(90 ${player.x} ${player.y})`}
-                    >
-                      {player.position}
-                    </SvgText>
-                  </G>
-                ))}
-              </Svg>
-            </View>
+          <View
+            style={[
+              styles.expandedFieldFrame,
+              {
+                width: EXPANDED_WINDOW_WIDTH,
+                height: EXPANDED_WINDOW_HEIGHT,
+                transform: "rotate(90deg)",
+              },
+            ]}
+          >
+            <View style={styles.expandedFieldStage}>{renderField()}</View>
           </View>
         </Pressable>
       </Modal>
@@ -638,8 +542,8 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#10151d",
     paddingHorizontal: 16,
-    paddingTop: 18,
-    paddingBottom: 20,
+    paddingTop: 24,
+    paddingBottom: 36,
   },
   headerPanel: {
     marginBottom: 10,
@@ -805,21 +709,31 @@ const styles = StyleSheet.create({
   },
   expandedFieldBackdrop: {
     flex: 1,
+    width: "100%",
+    height: "100%",
     backgroundColor: "#000000",
+    justifyContent: "center",
+    alignItems: "center",
     padding: 0,
     margin: 0,
   },
-  expandedFieldCard: {
+  expandedFieldFrame: {
+    width: EXPANDED_WINDOW_WIDTH,
+    height: EXPANDED_WINDOW_HEIGHT,
+    backgroundColor: "#000000",
+    justifyContent: "center",
+    alignItems: "center",
+    position: "relative",
+    padding: 0,
+    overflow: "hidden",
+  },
+  expandedFieldStage: {
     width: "100%",
     height: "100%",
     backgroundColor: "#000000",
+    justifyContent: "center",
+    alignItems: "center",
     overflow: "hidden",
-  },
-  expandedFieldShell: {
-    flex: 1,
-    backgroundColor: "#1d2c22",
-    transform: [{ rotate: "90deg" }],
-    width: "100%",
-    height: "100%",
+    padding: 0,
   },
 });
