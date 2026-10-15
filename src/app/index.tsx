@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   BackHandler,
   Dimensions,
+  Image,
   Modal,
   Pressable,
   ScrollView,
@@ -20,6 +21,8 @@ type Player = {
   y: number;
   color: string;
   info: string;
+  playstyle?: string;
+  imageUrl?: string;
 };
 
 type TeamInfo = {
@@ -45,6 +48,9 @@ type RosterAthlete = {
   jersey?: string | number;
   position?: {
     abbreviation?: string;
+  };
+  headshot?: {
+    href?: string;
   };
 };
 
@@ -454,19 +460,77 @@ const placeFormationPlayers = (
     }
 
     const position = athlete.position?.abbreviation ?? "ATH";
+    const imageUrl =
+      athlete.headshot?.href ??
+      (id
+        ? `https://a.espncdn.com/i/headshots/nfl/players/full/${id}.png`
+        : undefined);
+    const profileName =
+      athlete.displayName ?? athlete.fullName ?? "Unknown player";
+    const summary = `${profileName} is a ${position} who contributes with a balanced mix of effort and football IQ.`;
+
     return [
       {
         id: `${team.abbreviation}-${id}`,
-        name: athlete.displayName ?? athlete.fullName ?? "Unknown player",
+        name: profileName,
         position,
         jersey: String(athlete.jersey ?? "00"),
         x: spot.x,
         y: spot.y,
         color: team.color,
         info: `${position} for the ${team.name}.`,
+        playstyle: getPlayerPlaystyleSummary({
+          id: `${team.abbreviation}-${id}`,
+          name: profileName,
+          position,
+          jersey: String(athlete.jersey ?? "00"),
+          x: spot.x,
+          y: spot.y,
+          color: team.color,
+          info: summary,
+        }),
+        imageUrl,
       },
     ];
   });
+};
+
+const getPlayerPlaystyleSummary = (player: Player): string => {
+  const baseInfo = player.info?.trim();
+  const cleanName = player.name.split(" ")[0] ?? player.name;
+  const position = player.position?.trim() ?? "ATH";
+
+  if (position === "QB") {
+    return `${baseInfo || `${cleanName} is a quarterbacks-first decision maker who manipulates the pocket and keeps the offense on schedule.`} He sees the field early, keeps plays alive with movement, and makes the right throw when a lane opens. His game is built on timing, anticipation, and the ability to turn broken plays into positive gains.`;
+  }
+
+  if (["RB", "FB"].includes(position)) {
+    return `${baseInfo || `${cleanName} is a downhill runner who creates value through vision, balance, and contact balance.`} He attacks space with patience before accelerating through lanes and finishing with toughness. His playstyle is built on physical running, pass-catching versatility, and steady production in key moments.`;
+  }
+
+  if (["WR", "TE"].includes(position)) {
+    return `${baseInfo || `${cleanName} is a big-play athlete who wins with route discipline and ball skills.`} He creates separation, controls leverage, and attacks the ball with confidence in contested situations. His game emphasizes reliable hands, timing, and the ability to turn short routes into explosive gains.`;
+  }
+
+  if (["DE", "DT", "NT", "DL", "EDGE"].includes(position)) {
+    return `${baseInfo || `${cleanName} is a disruptive front-seven presence who creates pressure and collapses the pocket.`} He wins with power, leverage, and quick hands while attacking the quarterback or the ball carrier. His playstyle is defined by disruption, effort, and the ability to alter the rhythm of a drive.`;
+  }
+
+  if (["LB", "OLB", "ILB", "MLB"].includes(position)) {
+    return `${baseInfo || `${cleanName} is a fast, physical linebacker who reads the play and closes space quickly.`} He plays with good instincts, tackling power, and the awareness to defend both the run and the pass. His game balances downhill aggression with the patience to diagnose where the ball is going.`;
+  }
+
+  if (["CB", "S", "FS", "SS", "DB"].includes(position)) {
+    return `${baseInfo || `${cleanName} is a coverage-minded defender who stays connected to the ball and the receiver.`} He competes through leverage, anticipation, and quick reactions to break up throws or take away routes. His style is centered on discipline, speed, and creating tough coverage situations for the offense.`;
+  }
+
+  if (
+    ["C", "G", "OG", "LG", "RG", "OT", "T", "LT", "RT", "OL"].includes(position)
+  ) {
+    return `${baseInfo || `${cleanName} is an interior or edge protector who stabilizes the blocking front.`} He controls leverage, wins first contact, and gives the quarterback time to operate. His game is rooted in technique, balance, and making the next block before the defense can reset.`;
+  }
+
+  return `${baseInfo || `${cleanName} is a versatile player who adapts to the flow of the game.`} He consistently looks to win his matchup, maintain discipline, and make smart decisions when the play develops. His overall style is defined by toughness, awareness, and the ability to contribute in multiple situations.`;
 };
 
 const getPlayerGroup = (position: string): string => {
@@ -1010,7 +1074,13 @@ export default function FieldScreen() {
                           { backgroundColor: player.color },
                         ]}
                       />
-                      <Text style={styles.playerName}>{player.name}</Text>
+                      <Text style={styles.playerName}>
+                        {player.name}
+                        <Text style={styles.playerJersey}>
+                          {" "}
+                          #{player.jersey}
+                        </Text>
+                      </Text>
                       <Text style={styles.playerPosition}>
                         {player.position}
                       </Text>
@@ -1034,17 +1104,41 @@ export default function FieldScreen() {
           onPress={() => setSelectedPlayer(null)}
         >
           <Pressable style={styles.modalCard} onPress={() => {}}>
-            <Text style={styles.modalTitle}>
-              {selectedPlayer?.name ?? "Player"}
-            </Text>
-            <Text style={styles.modalPosition}>
-              {selectedPlayer?.position ?? "Position"}
-            </Text>
-            <Text style={styles.modalJersey}>
-              #{selectedPlayer?.jersey ?? "00"}
-            </Text>
+            <View style={styles.playerModalHeader}>
+              {selectedPlayer?.imageUrl ? (
+                <Image
+                  source={{ uri: selectedPlayer.imageUrl }}
+                  style={styles.playerPortrait}
+                  resizeMode="cover"
+                />
+              ) : (
+                <View
+                  style={[
+                    styles.playerPortraitFallback,
+                    { backgroundColor: selectedPlayer?.color ?? "#1b7fe0" },
+                  ]}
+                >
+                  <Text style={styles.playerPortraitFallbackText}>
+                    {selectedPlayer?.position ?? "ATH"}
+                  </Text>
+                </View>
+              )}
+              <View style={styles.playerModalMeta}>
+                <Text style={styles.modalTitle}>
+                  {selectedPlayer?.name ?? "Player"}
+                </Text>
+                <Text style={styles.modalPosition}>
+                  {selectedPlayer?.position ?? "Position"}
+                </Text>
+                <Text style={styles.modalJersey}>
+                  #{selectedPlayer?.jersey ?? "00"}
+                </Text>
+              </View>
+            </View>
             <Text style={styles.modalInfo}>
-              {selectedPlayer?.info ?? "Player information unavailable."}
+              {selectedPlayer
+                ? getPlayerPlaystyleSummary(selectedPlayer)
+                : "Player information unavailable."}
             </Text>
             <Pressable
               style={styles.closeButton}
@@ -1322,6 +1416,11 @@ const styles = StyleSheet.create({
     fontSize: 15,
     flex: 1,
   },
+  playerJersey: {
+    color: "#8bbaf1",
+    fontSize: 13,
+    fontWeight: "700",
+  },
   playerPosition: {
     color: "#8bbaf1",
     fontSize: 13,
@@ -1341,6 +1440,34 @@ const styles = StyleSheet.create({
     padding: 20,
     borderWidth: 1,
     borderColor: "#25405f",
+  },
+  playerModalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  playerPortrait: {
+    width: 92,
+    height: 92,
+    borderRadius: 18,
+    marginRight: 14,
+    backgroundColor: "#1d2a38",
+  },
+  playerPortraitFallback: {
+    width: 92,
+    height: 92,
+    borderRadius: 18,
+    marginRight: 14,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  playerPortraitFallbackText: {
+    color: "#f5f7fb",
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  playerModalMeta: {
+    flex: 1,
   },
   modalTitle: {
     color: "#f5f7fb",
