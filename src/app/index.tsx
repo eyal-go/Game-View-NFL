@@ -52,6 +52,17 @@ type RosterAthlete = {
   headshot?: {
     href?: string;
   };
+  status?: {
+    type?: {
+      name?: string;
+      description?: string;
+      id?: string;
+    };
+    name?: string;
+  };
+  active?: boolean;
+  injured?: boolean;
+  injuryStatus?: string;
 };
 
 type FormationRole =
@@ -371,34 +382,122 @@ const getTeamRoster = (teamId: string): Promise<RosterAthlete[]> => {
   return rosterRequest;
 };
 
+const inactiveStatusTerms = [
+  "inactive",
+  "out",
+  "injured reserve",
+  "ir",
+  "suspended",
+  "doubtful",
+  "questionable",
+  "unlikely",
+  "not active",
+  "n/a",
+];
+
+const getAthletePosition = (athlete: RosterAthlete): string =>
+  athlete.position?.abbreviation ?? "ATH";
+
+const isAthleteLikelyAvailable = (athlete: RosterAthlete): boolean => {
+  const statusText = [
+    athlete.status?.type?.name,
+    athlete.status?.type?.description,
+    athlete.status?.name,
+    athlete.injuryStatus,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (athlete.active === false) {
+    return false;
+  }
+
+  if (athlete.injured || statusText.includes("injured")) {
+    return false;
+  }
+
+  return !inactiveStatusTerms.some((term) => statusText.includes(term));
+};
+
+const getStarterPriority = (position: string): number => {
+  const value = position.toUpperCase();
+
+  if (value === "QB") return 120;
+  if (["LT", "LG", "C", "RG", "RT", "OT", "G", "T", "OL"].includes(value))
+    return 110;
+  if (["RB", "FB"].includes(value)) return 100;
+  if (["TE"].includes(value)) return 95;
+  if (["WR"].includes(value)) return 90;
+  if (["DE", "DT", "NT", "EDGE", "DL"].includes(value)) return 105;
+  if (["LB", "OLB", "ILB", "MLB"].includes(value)) return 100;
+  if (["CB", "S", "FS", "SS", "DB"].includes(value)) return 95;
+
+  return 50;
+};
+
+const getRosterHierarchyIndex = (
+  athlete: RosterAthlete,
+  roster: RosterAthlete[],
+): number => {
+  const index = roster.findIndex((candidate) => candidate.id === athlete.id);
+  return index >= 0 ? index : Number.MAX_SAFE_INTEGER;
+};
+
 const selectFormationPlayers = (
   athletes: RosterAthlete[],
   spots: FormationSpot[],
 ): string[] => {
   const available = athletes.filter(
-    (athlete): athlete is RosterAthlete & { id: string } => Boolean(athlete.id),
+    (athlete): athlete is RosterAthlete & { id: string } => {
+      return Boolean(athlete.id) && isAthleteLikelyAvailable(athlete);
+    },
   );
 
-  return spots.flatMap((spot) => {
-    if (available.length === 0) {
-      return [];
+  const remaining = [...available].sort((a, b) => {
+    const rosterIndexDiff =
+      getRosterHierarchyIndex(a, athletes) -
+      getRosterHierarchyIndex(b, athletes);
+
+    if (rosterIndexDiff !== 0) {
+      return rosterIndexDiff;
     }
 
-    const eligiblePositions = rolePositions[spot.role];
-    const eligibleIndices = available.flatMap((athlete, index) =>
-      eligiblePositions.includes(athlete.position?.abbreviation ?? "")
-        ? [index]
-        : [],
+    const priorityDiff =
+      getStarterPriority(getAthletePosition(b)) -
+      getStarterPriority(getAthletePosition(a));
+
+    if (priorityDiff !== 0) {
+      return priorityDiff;
+    }
+
+    return (a.displayName ?? a.fullName ?? "").localeCompare(
+      b.displayName ?? b.fullName ?? "",
     );
-    const candidateIndices =
-      eligibleIndices.length > 0
-        ? eligibleIndices
-        : available.map((_, index) => index);
-    const selectedIndex =
-      candidateIndices[Math.floor(Math.random() * candidateIndices.length)];
-    const [selected] = available.splice(selectedIndex, 1);
-    return selected ? [selected.id] : [];
   });
+
+  const selectedIds: string[] = [];
+
+  for (const spot of spots) {
+    const eligiblePositions = rolePositions[spot.role];
+    const candidate = remaining.find((athlete) =>
+      eligiblePositions.includes(getAthletePosition(athlete)),
+    );
+    const fallback = remaining.find(
+      (athlete) => athlete.position?.abbreviation !== undefined,
+    );
+    const chosen = candidate ?? fallback;
+
+    if (!chosen) {
+      continue;
+    }
+
+    const index = remaining.indexOf(chosen);
+    remaining.splice(index, 1);
+    selectedIds.push(chosen.id as string);
+  }
+
+  return selectedIds;
 };
 
 const getFormationPlan = (
@@ -418,7 +517,7 @@ const getFormationPlan = (
     return cachedPlan;
   }
 
-  const awayIsOffense = Math.random() < 0.5;
+  const awayIsOffense = true;
   const offenseSpots =
     offenseFormations[Math.floor(Math.random() * offenseFormations.length)];
   const defenseSpots =
