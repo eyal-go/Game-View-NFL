@@ -34,6 +34,7 @@ type TeamInfo = {
   role: "offense" | "defense";
   players: Player[];
   score?: string;
+  logoUrl?: string;
 };
 
 type Game = {
@@ -1108,6 +1109,7 @@ const getLiveGames = async (): Promise<Game[]> => {
             : fallback.alternateColor,
           role,
           players: [],
+          logoUrl: team?.logo,
         });
 
         const awayTeamId = awayTeam?.id ? String(awayTeam.id) : "";
@@ -1378,21 +1380,45 @@ export default function FieldScreen() {
             ]}
           >
             <View style={styles.gameChipMatchup}>
-              <Text style={styles.gameTeamText} numberOfLines={1}>
-                {game.away.name}
-                {game.isFinal && game.away.score !== undefined
-                  ? ` ${game.away.score}`
-                  : ""}
-              </Text>
+              <View style={styles.gameChipTeamRow}>
+                <View style={styles.gameChipTeamLogoSlot}>
+                  {game.away.logoUrl ? (
+                    <Image
+                      source={{ uri: game.away.logoUrl }}
+                      style={styles.gameChipTeamLogo}
+                      resizeMode="contain"
+                    />
+                  ) : null}
+                </View>
+                <Text style={styles.gameTeamText} numberOfLines={1}>
+                  {game.away.name}
+                  {game.isFinal && game.away.score !== undefined
+                    ? ` ${game.away.score}`
+                    : ""}
+                </Text>
+                <View style={styles.gameChipTeamLogoSlot} />
+              </View>
               <Text style={styles.gameMatchupText}>
                 {game.isFinal ? "Final" : "at"}
               </Text>
-              <Text style={styles.gameTeamText} numberOfLines={1}>
-                {game.home.name}
-                {game.isFinal && game.home.score !== undefined
-                  ? ` ${game.home.score}`
-                  : ""}
-              </Text>
+              <View style={styles.gameChipTeamRow}>
+                <View style={styles.gameChipTeamLogoSlot} />
+                <Text style={styles.gameTeamText} numberOfLines={1}>
+                  {game.home.name}
+                  {game.isFinal && game.home.score !== undefined
+                    ? ` ${game.home.score}`
+                    : ""}
+                </Text>
+                <View style={styles.gameChipTeamLogoSlot}>
+                  {game.home.logoUrl ? (
+                    <Image
+                      source={{ uri: game.home.logoUrl }}
+                      style={styles.gameChipTeamLogo}
+                      resizeMode="contain"
+                    />
+                  ) : null}
+                </View>
+              </View>
             </View>
             <Text style={styles.gameChipSub}>{game.status}</Text>
           </Pressable>
@@ -1427,12 +1453,13 @@ export default function FieldScreen() {
           {[selectedGame.away, selectedGame.home].map((team) => (
             <View key={team.abbreviation} style={styles.teamRoster}>
               <View style={styles.teamRosterHeader}>
-                <View
-                  style={[
-                    styles.teamColorMark,
-                    { backgroundColor: team.color },
-                  ]}
-                />
+                {team.logoUrl ? (
+                  <Image
+                    source={{ uri: team.logoUrl }}
+                    style={styles.teamLogo}
+                    resizeMode="contain"
+                  />
+                ) : null}
                 <Text style={styles.teamRosterName}>{team.name}</Text>
                 <Text style={styles.teamRosterRole}>{team.role}</Text>
               </View>
@@ -1659,12 +1686,30 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     flex: 1,
+    width: "100%",
+  },
+  gameChipTeamRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    width: "100%",
+    gap: 8,
+    justifyContent: "center",
+  },
+  gameChipTeamLogoSlot: {
+    width: 28,
+    height: 28,
+    flexShrink: 0,
+  },
+  gameChipTeamLogo: {
+    width: 28,
+    height: 28,
   },
   gameTeamText: {
     color: "#f5f7fb",
     fontSize: 15,
     fontWeight: "700",
     textAlign: "center",
+    flex: 1,
   },
   gameMatchupText: {
     color: "#8bbaf1",
@@ -1725,6 +1770,12 @@ const styles = StyleSheet.create({
     padding: 12,
     borderWidth: 1,
     borderColor: "#213244",
+  },
+  teamLogo: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    marginRight: 8,
   },
   teamRosterHeader: {
     flexDirection: "row",
