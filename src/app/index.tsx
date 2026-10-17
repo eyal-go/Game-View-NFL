@@ -12,6 +12,7 @@ import {
 } from "react-native";
 import Svg, { Circle, G, Line, Rect, Text as SvgText } from "react-native-svg";
 
+// Object shapes used by the screen and by ESPN API responses.
 type Player = {
   id: string;
   name: string;
@@ -32,11 +33,13 @@ type TeamInfo = {
   alternateColor: string;
   role: "offense" | "defense";
   players: Player[];
+  score?: string;
 };
 
 type Game = {
   id: string;
   status: string;
+  isFinal?: boolean;
   away: TeamInfo;
   home: TeamInfo;
 };
@@ -63,6 +66,39 @@ type RosterAthlete = {
   active?: boolean;
   injured?: boolean;
   injuryStatus?: string;
+};
+
+type TeamScheduleEvent = {
+  id?: string;
+  date?: string;
+  competitions?: {
+    status?: {
+      type?: {
+        completed?: boolean;
+      };
+    };
+    competitors?: {
+      team?: {
+        id?: string;
+      };
+    }[];
+  }[];
+};
+
+type GameRosterEntry = {
+  playerId?: string | number;
+  starter?: boolean;
+  valid?: boolean;
+  didNotPlay?: boolean;
+};
+
+type GameInjuryReport = {
+  injuries?: {
+    status?: string;
+    athlete?: {
+      id?: string;
+    };
+  }[];
 };
 
 type FormationRole =
@@ -92,6 +128,7 @@ type GameFormationPlan = {
   homeSpots: FormationSpot[];
 };
 
+// Screen dimensions and sample data used when live game data is unavailable.
 const FIELD_WIDTH = 1200;
 const FIELD_HEIGHT = 600;
 const SCREEN_WIDTH = Dimensions.get("screen").width;
@@ -267,8 +304,11 @@ const demoGames: Game[] = [
 ];
 
 const rosterCache = new Map<string, Promise<RosterAthlete[]>>();
+const teamScheduleCache = new Map<string, Promise<TeamScheduleEvent[]>>();
+const gameStarterCache = new Map<string, Promise<string[]>>();
 const formationCache = new Map<string, GameFormationPlan>();
 
+// Field layouts and the positions eligible for each formation role.
 const offenseFormations: FormationSpot[][] = [
   [
     ...[170, 235, 300, 365, 430].map((y) => ({
@@ -342,6 +382,7 @@ const rolePositions: Record<FormationRole, string[]> = {
   defensiveBack: ["CB", "S", "FS", "SS", "DB"],
 };
 
+// ESPN data loading, previous-game starter lookup, and player availability.
 const getTeamRoster = (teamId: string): Promise<RosterAthlete[]> => {
   const cachedRoster = rosterCache.get(teamId);
   if (cachedRoster) {
@@ -382,18 +423,139 @@ const getTeamRoster = (teamId: string): Promise<RosterAthlete[]> => {
   return rosterRequest;
 };
 
+const getTeamSchedule = (
+  teamId: string,
+  seasonYear: number,
+): Promise<TeamScheduleEvent[]> => {
+  const cacheKey = `${teamId}:${seasonYear}`;
+  const cachedSchedule = teamScheduleCache.get(cacheKey);
+  if (cachedSchedule) {
+    return cachedSchedule;
+  }
+
+  const scheduleRequest = fetch(
+    `https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/${teamId}/schedule?season=${seasonYear}`,
+  )
+    .then(async (response) => {
+      if (!response.ok) {
+        throw new Error("Team schedule request failed");
+      }
+
+      const data: { events?: TeamScheduleEvent[] } = await response.json();
+      return Array.isArray(data.events) ? data.events : [];
+    })
+    .catch((error: unknown) => {
+      teamScheduleCache.delete(cacheKey);
+      console.warn(`Could not load the schedule for team ${teamId}`, error);
+      return [];
+    });
+
+  teamScheduleCache.set(cacheKey, scheduleRequest);
+  return scheduleRequest;
+};
+
+const getPreviousGameStarterIds = async (
+  teamId: string,
+  seasonYear: number,
+  gameDate: string,
+): Promise<string[]> => {
+  const gameTimestamp = Date.parse(gameDate);
+  if (!Number.isFinite(gameTimestamp)) {
+    return [];
+  }
+
+  const schedule = await getTeamSchedule(teamId, seasonYear);
+  const previousGame = schedule
+    .filter((event) => {
+      const eventDate = Date.parse(event.date ?? "");
+      return (
+        Boolean(event.id) &&
+        Number.isFinite(eventDate) &&
+        eventDate < gameTimestamp &&
+        event.competitions?.some(
+          (competition) =>
+            competition.status?.type?.completed === true &&
+            competition.competitors?.some(
+              (competitor) => competitor.team?.id === teamId,
+            ),
+        )
+      );
+    })
+    .sort(
+      (first, second) =>
+        Date.parse(second.date ?? "") - Date.parse(first.date ?? ""),
+    )[0];
+
+  if (!previousGame?.id) {
+    return [];
+  }
+
+  const cacheKey = `${previousGame.id}:${teamId}`;
+  const cachedStarters = gameStarterCache.get(cacheKey);
+  if (cachedStarters) {
+    return cachedStarters;
+  }
+
+  const starterRequest = fetch(
+    `https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/events/${previousGame.id}/competitions/${previousGame.id}/competitors/${teamId}/roster?limit=100`,
+  )
+    .then(async (response) => {
+      if (!response.ok) {
+        throw new Error("Previous-game roster request failed");
+      }
+
+      const data: { entries?: GameRosterEntry[] } = await response.json();
+      return (Array.isArray(data.entries) ? data.entries : []).flatMap(
+        (entry) =>
+          entry.starter === true &&
+          entry.valid !== false &&
+          entry.didNotPlay !== true &&
+          entry.playerId !== undefined
+            ? [String(entry.playerId)]
+            : [],
+      );
+    })
+    .catch((error: unknown) => {
+      gameStarterCache.delete(cacheKey);
+      console.warn(
+        `Could not load starters from team ${teamId}'s previous game`,
+        error,
+      );
+      return [];
+    });
+
+  gameStarterCache.set(cacheKey, starterRequest);
+  return starterRequest;
+};
+
 const inactiveStatusTerms = [
   "inactive",
   "out",
   "injured reserve",
-  "ir",
   "suspended",
   "doubtful",
   "questionable",
   "unlikely",
   "not active",
+  "unavailable",
+  "physically unable to perform",
+  "non-football injury",
+  "pup",
+  "nfi",
   "n/a",
 ];
+
+const isStatusUnavailable = (statusText: string): boolean => {
+  const normalizedStatus = statusText.toLowerCase();
+  return (
+    normalizedStatus.includes("injured") ||
+    inactiveStatusTerms.some((term) =>
+      new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(
+        normalizedStatus,
+      ),
+    )
+  );
+};
 
 const getAthletePosition = (athlete: RosterAthlete): string =>
   athlete.position?.abbreviation ?? "ATH";
@@ -413,11 +575,42 @@ const isAthleteLikelyAvailable = (athlete: RosterAthlete): boolean => {
     return false;
   }
 
-  if (athlete.injured || statusText.includes("injured")) {
+  if (athlete.injured || isStatusUnavailable(statusText)) {
     return false;
   }
 
-  return !inactiveStatusTerms.some((term) => statusText.includes(term));
+  return true;
+};
+
+const getGameUnavailablePlayerIds = (gameId: string): Promise<Set<string>> => {
+  return fetch(
+    `https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary?event=${gameId}`,
+  )
+    .then(async (response) => {
+      if (!response.ok) {
+        throw new Error("Game injury report request failed");
+      }
+
+      const data: { injuries?: GameInjuryReport[] } = await response.json();
+      const unavailablePlayerIds = new Set<string>();
+
+      for (const teamReport of Array.isArray(data.injuries)
+        ? data.injuries
+        : []) {
+        for (const injury of teamReport.injuries ?? []) {
+          const playerId = injury.athlete?.id;
+          if (playerId && isStatusUnavailable(injury.status ?? "")) {
+            unavailablePlayerIds.add(playerId);
+          }
+        }
+      }
+
+      return unavailablePlayerIds;
+    })
+    .catch((error: unknown) => {
+      console.warn(`Could not load injury statuses for game ${gameId}`, error);
+      return new Set<string>();
+    });
 };
 
 const getStarterPriority = (position: string): number => {
@@ -444,17 +637,31 @@ const getRosterHierarchyIndex = (
   return index >= 0 ? index : Number.MAX_SAFE_INTEGER;
 };
 
+// Build a lineup from available prior starters, filling gaps from the roster.
 const selectFormationPlayers = (
   athletes: RosterAthlete[],
   spots: FormationSpot[],
+  previousStarterIds: ReadonlySet<string>,
+  unavailablePlayerIds: ReadonlySet<string>,
 ): string[] => {
   const available = athletes.filter(
     (athlete): athlete is RosterAthlete & { id: string } => {
-      return Boolean(athlete.id) && isAthleteLikelyAvailable(athlete);
+      return (
+        athlete.id !== undefined &&
+        !unavailablePlayerIds.has(athlete.id) &&
+        isAthleteLikelyAvailable(athlete)
+      );
     },
   );
 
   const remaining = [...available].sort((a, b) => {
+    const starterPriority =
+      Number(previousStarterIds.has(b.id)) -
+      Number(previousStarterIds.has(a.id));
+    if (starterPriority !== 0) {
+      return starterPriority;
+    }
+
     const rosterIndexDiff =
       getRosterHierarchyIndex(a, athletes) -
       getRosterHierarchyIndex(b, athletes);
@@ -506,22 +713,31 @@ const getFormationPlan = (
   homeTeamId: string,
   awayRoster: RosterAthlete[],
   homeRoster: RosterAthlete[],
+  awayStarterIds: ReadonlySet<string>,
+  homeStarterIds: ReadonlySet<string>,
+  unavailablePlayerIds: ReadonlySet<string>,
 ): GameFormationPlan => {
   const cachedPlan = formationCache.get(gameId);
-  if (
-    cachedPlan?.awayTeamId === awayTeamId &&
+  const cachedFormation =
+    cachedPlan &&
+    cachedPlan.awayTeamId === awayTeamId &&
     cachedPlan.homeTeamId === homeTeamId &&
-    cachedPlan.awayPlayerIds.length > 0 &&
-    cachedPlan.homePlayerIds.length > 0
-  ) {
-    return cachedPlan;
-  }
+    cachedPlan.awaySpots.length > 0 &&
+    cachedPlan.homeSpots.length > 0
+      ? cachedPlan
+      : undefined;
 
   const awayIsOffense = true;
-  const offenseSpots =
-    offenseFormations[Math.floor(Math.random() * offenseFormations.length)];
-  const defenseSpots =
-    defenseFormations[Math.floor(Math.random() * defenseFormations.length)];
+  const offenseSpots = cachedFormation
+    ? cachedFormation.awayRole === "offense"
+      ? cachedFormation.awaySpots
+      : cachedFormation.homeSpots
+    : offenseFormations[Math.floor(Math.random() * offenseFormations.length)];
+  const defenseSpots = cachedFormation
+    ? cachedFormation.awayRole === "defense"
+      ? cachedFormation.awaySpots
+      : cachedFormation.homeSpots
+    : defenseFormations[Math.floor(Math.random() * defenseFormations.length)];
   const awaySpots = awayIsOffense ? offenseSpots : defenseSpots;
   const homeSpots = awayIsOffense ? defenseSpots : offenseSpots;
   const orientSpots = (spots: FormationSpot[]): FormationSpot[] =>
@@ -533,8 +749,18 @@ const getFormationPlan = (
     homeTeamId,
     awayRole: awayIsOffense ? "offense" : "defense",
     homeRole: awayIsOffense ? "defense" : "offense",
-    awayPlayerIds: selectFormationPlayers(awayRoster, awaySpots),
-    homePlayerIds: selectFormationPlayers(homeRoster, homeSpots),
+    awayPlayerIds: selectFormationPlayers(
+      awayRoster,
+      awaySpots,
+      awayStarterIds,
+      unavailablePlayerIds,
+    ),
+    homePlayerIds: selectFormationPlayers(
+      homeRoster,
+      homeSpots,
+      homeStarterIds,
+      unavailablePlayerIds,
+    ),
     awaySpots: orientSpots(awaySpots),
     homeSpots: orientSpots(homeSpots),
   };
@@ -594,6 +820,7 @@ const placeFormationPlayers = (
   });
 };
 
+// Player descriptions and grouping helpers used by the lineup UI.
 const getPlayerPlaystyleSummary = (player: Player): string => {
   const baseInfo = player.info?.trim();
   const cleanName = player.name.split(" ")[0] ?? player.name;
@@ -681,6 +908,7 @@ const getPlayerGroups = (players: Player[]) => {
   });
 };
 
+// Text shown in the informational modal for each position group.
 const positionGroupInfo: Record<
   string,
   { objective: string; roles: { name: string; description: string }[] }
@@ -820,6 +1048,7 @@ const positionGroupInfo: Record<
   },
 };
 
+// Fetch preview games and assemble each team's formation and lineup.
 const getLiveGames = async (): Promise<Game[]> => {
   try {
     const response = await fetch(
@@ -832,6 +1061,7 @@ const getLiveGames = async (): Promise<Game[]> => {
 
     const data = await response.json();
     const events = Array.isArray(data?.events) ? data.events : [];
+    const seasonYear = Number(data?.season?.year) || new Date().getFullYear();
 
     if (events.length === 0) {
       return demoGames;
@@ -854,6 +1084,16 @@ const getLiveGames = async (): Promise<Game[]> => {
           event.status?.type?.detail ??
           event.status?.type?.description ??
           "Scheduled";
+        const isFinal = competition?.status?.type?.completed === true;
+        const formatScore = (
+          score: string | number | { displayValue?: string; value?: number },
+        ): string | undefined => {
+          if (typeof score === "string" || typeof score === "number") {
+            return String(score);
+          }
+
+          return score.displayValue ?? score.value?.toString();
+        };
 
         const formatTeam = (
           team: any,
@@ -876,12 +1116,33 @@ const getLiveGames = async (): Promise<Game[]> => {
           awayTeamId ? getTeamRoster(awayTeamId) : Promise.resolve([]),
           homeTeamId ? getTeamRoster(homeTeamId) : Promise.resolve([]),
         ]);
+        const [awayStarterIds, homeStarterIds, unavailablePlayerIds] =
+          await Promise.all([
+            awayTeamId
+              ? getPreviousGameStarterIds(
+                  awayTeamId,
+                  seasonYear,
+                  String(event.date ?? ""),
+                )
+              : Promise.resolve([]),
+            homeTeamId
+              ? getPreviousGameStarterIds(
+                  homeTeamId,
+                  seasonYear,
+                  String(event.date ?? ""),
+                )
+              : Promise.resolve([]),
+            getGameUnavailablePlayerIds(String(event.id)),
+          ]);
         const formationPlan = getFormationPlan(
           String(event.id),
           awayTeamId,
           homeTeamId,
           awayRoster,
           homeRoster,
+          new Set(awayStarterIds),
+          new Set(homeStarterIds),
+          unavailablePlayerIds,
         );
 
         const away = formatTeam(
@@ -894,6 +1155,16 @@ const getLiveGames = async (): Promise<Game[]> => {
           demoGames[0].home,
           formationPlan.homeRole,
         );
+        if (isFinal) {
+          away.score =
+            awayCompetitor?.score !== undefined
+              ? formatScore(awayCompetitor.score)
+              : undefined;
+          home.score =
+            homeCompetitor?.score !== undefined
+              ? formatScore(homeCompetitor.score)
+              : undefined;
+        }
         away.players = placeFormationPlayers(
           awayRoster,
           formationPlan.awayPlayerIds,
@@ -910,6 +1181,7 @@ const getLiveGames = async (): Promise<Game[]> => {
         return {
           id: event.id,
           status,
+          isFinal,
           away,
           home,
         };
@@ -920,6 +1192,7 @@ const getLiveGames = async (): Promise<Game[]> => {
   }
 };
 
+// Screen state, event handlers, and React Native rendering.
 export default function FieldScreen() {
   const [games, setGames] = useState<Game[]>(demoGames);
   const [selectedGameId, setSelectedGameId] = useState<string>(demoGames[0].id);
@@ -1107,10 +1380,18 @@ export default function FieldScreen() {
             <View style={styles.gameChipMatchup}>
               <Text style={styles.gameTeamText} numberOfLines={1}>
                 {game.away.name}
+                {game.isFinal && game.away.score !== undefined
+                  ? ` ${game.away.score}`
+                  : ""}
               </Text>
-              <Text style={styles.gameMatchupText}>at</Text>
+              <Text style={styles.gameMatchupText}>
+                {game.isFinal ? "Final" : "at"}
+              </Text>
               <Text style={styles.gameTeamText} numberOfLines={1}>
                 {game.home.name}
+                {game.isFinal && game.home.score !== undefined
+                  ? ` ${game.home.score}`
+                  : ""}
               </Text>
             </View>
             <Text style={styles.gameChipSub}>{game.status}</Text>
@@ -1119,9 +1400,21 @@ export default function FieldScreen() {
       </ScrollView>
 
       <View style={styles.teamsRow}>
-        <Text style={styles.teamText}>{selectedGame.away.name}</Text>
-        <Text style={styles.vsText}>@</Text>
-        <Text style={styles.teamText}>{selectedGame.home.name}</Text>
+        <Text style={styles.teamText}>
+          {selectedGame.away.name}
+          {selectedGame.isFinal && selectedGame.away.score !== undefined
+            ? ` ${selectedGame.away.score}`
+            : ""}
+        </Text>
+        <Text style={styles.vsText}>
+          {selectedGame.isFinal ? "Final" : "@"}
+        </Text>
+        <Text style={styles.teamText}>
+          {selectedGame.home.name}
+          {selectedGame.isFinal && selectedGame.home.score !== undefined
+            ? ` ${selectedGame.home.score}`
+            : ""}
+        </Text>
       </View>
 
       <Pressable onPress={() => setIsFieldExpanded(true)}>
@@ -1315,6 +1608,7 @@ export default function FieldScreen() {
   );
 }
 
+// Styles for the screen, field, player groups, and modal panels.
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
