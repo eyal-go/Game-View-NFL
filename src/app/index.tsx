@@ -49,6 +49,8 @@ type TeamInfo = {
 type Game = {
   id: string;
   status: string;
+  date?: string;
+  seasonYear?: number;
   isFinal?: boolean;
   isInProgress?: boolean;
   away: TeamInfo;
@@ -119,9 +121,11 @@ type PlayParticipant = {
   id: string;
   name: string;
   position: string;
+  jersey: string;
   teamId: string;
   role: string;
   color: string;
+  player: Player;
 };
 
 type RosterAthlete = {
@@ -386,6 +390,7 @@ const demoGames: Game[] = [
 const rosterCache = new Map<string, Promise<RosterAthlete[]>>();
 const teamScheduleCache = new Map<string, Promise<TeamScheduleEvent[]>>();
 const gameStarterCache = new Map<string, Promise<string[]>>();
+const gameLineupCache = new Map<string, Promise<Game>>();
 const formationCache = new Map<string, GameFormationPlan>();
 
 // Field layouts and the positions eligible for each formation role.
@@ -960,6 +965,8 @@ const selectFormationPlayers = (
   spots: FormationSpot[],
   previousStarterIds: ReadonlySet<string>,
   unavailablePlayerIds: ReadonlySet<string>,
+  preferredPlayerIds: ReadonlySet<string> = new Set(),
+  trackedQuarterbackIds: ReadonlySet<string> = new Set(),
 ): string[] => {
   const available = athletes.filter(
     (athlete): athlete is RosterAthlete & { id: string } => {
@@ -972,6 +979,20 @@ const selectFormationPlayers = (
   );
 
   const remaining = [...available].sort((a, b) => {
+    const trackedQuarterbackPriority =
+      Number(trackedQuarterbackIds.has(b.id)) -
+      Number(trackedQuarterbackIds.has(a.id));
+    if (trackedQuarterbackPriority !== 0) {
+      return trackedQuarterbackPriority;
+    }
+
+    const preferredPriority =
+      Number(preferredPlayerIds.has(b.id)) -
+      Number(preferredPlayerIds.has(a.id));
+    if (preferredPriority !== 0) {
+      return preferredPriority;
+    }
+
     const starterPriority =
       Number(previousStarterIds.has(b.id)) -
       Number(previousStarterIds.has(a.id));
@@ -1365,153 +1386,220 @@ const positionGroupInfo: Record<
   },
 };
 
-// Fetch preview games and assemble each team's formation and lineup.
-const getLiveGames = async (): Promise<Game[]> => {
-  try {
-    const response = await fetch(
-      "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard",
-    );
+const getScoreboardGames = async (): Promise<Game[]> => {
+  const response = await fetch(
+    "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard",
+  );
+  if (!response.ok) {
+    throw new Error("NFL scoreboard request failed");
+  }
 
-    if (!response.ok) {
-      return demoGames;
+  const data = await response.json();
+  const events = Array.isArray(data?.events) ? data.events : [];
+  const seasonYear = Number(data?.season?.year) || new Date().getFullYear();
+
+  return events.flatMap((event: any) => {
+    const competition = event.competitions?.[0];
+    const competitors = competition?.competitors ?? [];
+    const homeCompetitor =
+      competitors.find((item: any) => item.homeAway === "home") ??
+      competitors[0];
+    const awayCompetitor =
+      competitors.find((item: any) => item.homeAway === "away") ??
+      competitors[1] ??
+      competitors[0];
+    const homeTeam = homeCompetitor?.team;
+    const awayTeam = awayCompetitor?.team;
+    if (!event.id || !homeTeam || !awayTeam) {
+      return [];
     }
 
-    const data = await response.json();
-    const events = Array.isArray(data?.events) ? data.events : [];
-    const seasonYear = Number(data?.season?.year) || new Date().getFullYear();
+    const isFinal = competition?.status?.type?.completed === true;
+    const formatScore = (
+      score: string | number | { displayValue?: string; value?: number },
+    ): string | undefined => {
+      if (typeof score === "string" || typeof score === "number") {
+        return String(score);
+      }
 
-    if (events.length === 0) {
-      return demoGames;
-    }
+      return score.displayValue ?? score.value?.toString();
+    };
+    const formatTeam = (
+      team: any,
+      fallback: TeamInfo,
+      role: "offense" | "defense",
+      score:
+        | string
+        | number
+        | { displayValue?: string; value?: number }
+        | undefined,
+    ): TeamInfo => ({
+      id: team?.id ? String(team.id) : undefined,
+      name: team?.displayName ?? fallback.name,
+      abbreviation: team?.abbreviation ?? fallback.abbreviation,
+      color: team?.color ? `#${team.color}` : fallback.color,
+      alternateColor: team?.alternateColor
+        ? `#${team.alternateColor}`
+        : fallback.alternateColor,
+      role,
+      players: [],
+      score: score === undefined ? undefined : formatScore(score),
+      logoUrl: team?.logo,
+    });
 
-    return Promise.all(
-      events.slice(0, 3).map(async (event: any) => {
-        const competition = event.competitions?.[0];
-        const competitors = competition?.competitors ?? [];
-        const homeCompetitor =
-          competitors.find((item: any) => item.homeAway === "home") ??
-          competitors[0];
-        const awayCompetitor =
-          competitors.find((item: any) => item.homeAway === "away") ??
-          competitors[1] ??
-          competitors[0];
-        const homeTeam = homeCompetitor?.team;
-        const awayTeam = awayCompetitor?.team;
-        const status =
+    return [
+      {
+        id: String(event.id),
+        status:
           event.status?.type?.detail ??
           event.status?.type?.description ??
-          "Scheduled";
-        const isFinal = competition?.status?.type?.completed === true;
-        const isInProgress = competition?.status?.type?.state === "in";
-        const formatScore = (
-          score: string | number | { displayValue?: string; value?: number },
-        ): string | undefined => {
-          if (typeof score === "string" || typeof score === "number") {
-            return String(score);
-          }
-
-          return score.displayValue ?? score.value?.toString();
-        };
-
-        const formatTeam = (
-          team: any,
-          fallback: TeamInfo,
-          role: "offense" | "defense",
-        ): TeamInfo => ({
-          id: team?.id ? String(team.id) : undefined,
-          name: team?.displayName ?? fallback.name,
-          abbreviation: team?.abbreviation ?? fallback.abbreviation,
-          color: team?.color ? `#${team.color}` : fallback.color,
-          alternateColor: team?.alternateColor
-            ? `#${team.alternateColor}`
-            : fallback.alternateColor,
-          role,
-          players: [],
-          logoUrl: team?.logo,
-        });
-
-        const awayTeamId = awayTeam?.id ? String(awayTeam.id) : "";
-        const homeTeamId = homeTeam?.id ? String(homeTeam.id) : "";
-        const [awayRoster, homeRoster] = await Promise.all([
-          awayTeamId ? getTeamRoster(awayTeamId) : Promise.resolve([]),
-          homeTeamId ? getTeamRoster(homeTeamId) : Promise.resolve([]),
-        ]);
-        const [awayStarterIds, homeStarterIds, unavailablePlayerIds] =
-          await Promise.all([
-            awayTeamId
-              ? getPreviousGameStarterIds(
-                  awayTeamId,
-                  seasonYear,
-                  String(event.date ?? ""),
-                )
-              : Promise.resolve([]),
-            homeTeamId
-              ? getPreviousGameStarterIds(
-                  homeTeamId,
-                  seasonYear,
-                  String(event.date ?? ""),
-                )
-              : Promise.resolve([]),
-            getGameUnavailablePlayerIds(String(event.id)),
-          ]);
-        const formationPlan = getFormationPlan(
-          String(event.id),
-          awayTeamId,
-          homeTeamId,
-          awayRoster,
-          homeRoster,
-          new Set(awayStarterIds),
-          new Set(homeStarterIds),
-          unavailablePlayerIds,
-        );
-
-        const away = formatTeam(
+          "Scheduled",
+        date: String(event.date ?? ""),
+        seasonYear,
+        isFinal,
+        isInProgress: competition?.status?.type?.state === "in",
+        away: formatTeam(
           awayTeam,
           demoGames[0].away,
-          formationPlan.awayRole,
-        );
-        const home = formatTeam(
+          "offense",
+          awayCompetitor?.score,
+        ),
+        home: formatTeam(
           homeTeam,
           demoGames[0].home,
-          formationPlan.homeRole,
-        );
-        if (isFinal) {
-          away.score =
-            awayCompetitor?.score !== undefined
-              ? formatScore(awayCompetitor.score)
-              : undefined;
-          home.score =
-            homeCompetitor?.score !== undefined
-              ? formatScore(homeCompetitor.score)
-              : undefined;
-        }
-        away.players = placeFormationPlayers(
-          awayRoster,
-          formationPlan.awayPlayerIds,
-          formationPlan.awaySpots,
-          away,
-        );
-        home.players = placeFormationPlayers(
-          homeRoster,
-          formationPlan.homePlayerIds,
-          formationPlan.homeSpots,
-          home,
-        );
+          "defense",
+          homeCompetitor?.score,
+        ),
+      },
+    ];
+  });
+};
 
-        return {
-          id: event.id,
-          status,
-          isFinal,
-          isInProgress,
-          away,
-          home,
-        };
-      }),
-    );
-  } catch (error: unknown) {
-    console.warn("Could not load live NFL games", error);
+const getInitialAvailableGames = (scoreboardGames: Game[]): Game[] => {
+  if (scoreboardGames.length === 0) {
     return demoGames;
   }
+
+  const availableGames = scoreboardGames.slice(0, 7);
+  const baltimoreGame = scoreboardGames.find(
+    (game) => game.away.id === "33" || game.home.id === "33",
+  );
+  const pittsburghGameIndex = availableGames.findIndex(
+    (game) => game.away.id === "23" || game.home.id === "23",
+  );
+
+  if (baltimoreGame && pittsburghGameIndex !== -1) {
+    availableGames[pittsburghGameIndex] = baltimoreGame;
+  }
+
+  const availableIds = new Set(availableGames.map((game) => game.id));
+  return [
+    ...availableGames,
+    ...scoreboardGames.filter(
+      (game) => game.isInProgress && !availableIds.has(game.id),
+    ),
+  ];
+};
+
+const mergeAvailableGames = (
+  currentGames: Game[],
+  scoreboardGames: Game[],
+): Game[] => {
+  if (currentGames.every((game) => game.id.startsWith("demo-"))) {
+    return getInitialAvailableGames(scoreboardGames);
+  }
+
+  const gamesById = new Map(scoreboardGames.map((game) => [game.id, game]));
+  const availableGames = currentGames
+    .filter((game) => !game.id.startsWith("demo-"))
+    .map((currentGame) => {
+      const updatedGame = gamesById.get(currentGame.id);
+      if (!updatedGame) {
+        return currentGame;
+      }
+
+      return {
+        ...updatedGame,
+        away: {
+          ...updatedGame.away,
+          role: currentGame.away.role,
+          players: currentGame.away.players,
+        },
+        home: {
+          ...updatedGame.home,
+          role: currentGame.home.role,
+          players: currentGame.home.players,
+        },
+      };
+    });
+  const availableIds = new Set(availableGames.map((game) => game.id));
+
+  return [
+    ...availableGames,
+    ...scoreboardGames.filter(
+      (game) => game.isInProgress && !availableIds.has(game.id),
+    ),
+  ];
+};
+
+const getGameLineup = (game: Game): Promise<Game> => {
+  const cachedLineup = gameLineupCache.get(game.id);
+  if (cachedLineup) {
+    return cachedLineup;
+  }
+
+  const awayTeamId = game.away.id ?? "";
+  const homeTeamId = game.home.id ?? "";
+  const seasonYear = game.seasonYear ?? new Date().getFullYear();
+  const lineupRequest = (async () => {
+    const [awayRoster, homeRoster] = await Promise.all([
+      awayTeamId ? getTeamRoster(awayTeamId) : Promise.resolve([]),
+      homeTeamId ? getTeamRoster(homeTeamId) : Promise.resolve([]),
+    ]);
+    const [awayStarterIds, homeStarterIds, unavailablePlayerIds] =
+      await Promise.all([
+        awayTeamId
+          ? getPreviousGameStarterIds(awayTeamId, seasonYear, game.date ?? "")
+          : Promise.resolve([]),
+        homeTeamId
+          ? getPreviousGameStarterIds(homeTeamId, seasonYear, game.date ?? "")
+          : Promise.resolve([]),
+        getGameUnavailablePlayerIds(game.id),
+      ]);
+    const formationPlan = getFormationPlan(
+      game.id,
+      awayTeamId,
+      homeTeamId,
+      awayRoster,
+      homeRoster,
+      new Set(awayStarterIds),
+      new Set(homeStarterIds),
+      unavailablePlayerIds,
+    );
+    const away = { ...game.away, role: formationPlan.awayRole };
+    const home = { ...game.home, role: formationPlan.homeRole };
+
+    away.players = placeFormationPlayers(
+      awayRoster,
+      formationPlan.awayPlayerIds,
+      formationPlan.awaySpots,
+      away,
+    );
+    home.players = placeFormationPlayers(
+      homeRoster,
+      formationPlan.homePlayerIds,
+      formationPlan.homeSpots,
+      home,
+    );
+
+    return { ...game, away, home };
+  })().catch((error: unknown) => {
+    gameLineupCache.delete(game.id);
+    throw error;
+  });
+
+  gameLineupCache.set(game.id, lineupRequest);
+  return lineupRequest;
 };
 
 // Screen state, event handlers, and React Native rendering.
@@ -1539,6 +1627,11 @@ export default function FieldScreen() {
     awayPlayers: Player[];
     homePlayers: Player[];
   } | null>(null);
+  const [lineupLoadState, setLineupLoadState] = useState<{
+    gameId: string;
+    status: "loaded" | "error";
+  } | null>(null);
+  const [lineupRetryKey, setLineupRetryKey] = useState(0);
   const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null);
   const [selectedGroupInfo, setSelectedGroupInfo] = useState<string | null>(
     null,
@@ -1547,16 +1640,25 @@ export default function FieldScreen() {
 
   useEffect(() => {
     let isMounted = true;
+    let isLoading = false;
 
     const loadGames = async () => {
-      const liveGames = await getLiveGames();
-      if (!isMounted) {
+      if (isLoading) {
         return;
       }
 
-      setGames(liveGames);
-      if (!liveGames.some((game) => game.id === selectedGameId)) {
-        setSelectedGameId(liveGames[0].id);
+      isLoading = true;
+      try {
+        const scoreboardGames = await getScoreboardGames();
+        if (isMounted) {
+          setGames((currentGames) =>
+            mergeAvailableGames(currentGames, scoreboardGames),
+          );
+        }
+      } catch (error) {
+        console.warn("Could not refresh the NFL scoreboard", error);
+      } finally {
+        isLoading = false;
       }
     };
 
@@ -1567,7 +1669,7 @@ export default function FieldScreen() {
       isMounted = false;
       clearInterval(interval);
     };
-  }, [selectedGameId]);
+  }, []);
 
   useEffect(() => {
     if (!isFieldExpanded) {
@@ -1590,7 +1692,84 @@ export default function FieldScreen() {
     [games, selectedGameId],
   );
 
-  const gamePlays = playData.gameId === selectedGame.id ? playData.plays : [];
+  useEffect(() => {
+    let isMounted = true;
+
+    if (selectedGame.id.startsWith("demo-")) {
+      return () => {
+        isMounted = false;
+      };
+    }
+
+    getGameLineup(selectedGame)
+      .then((lineup) => {
+        if (!isMounted) {
+          return;
+        }
+
+        setGames((currentGames) =>
+          currentGames.map((game) => {
+            if (game.id !== lineup.id) {
+              return game;
+            }
+
+            if (
+              game.away.role === lineup.away.role &&
+              game.home.role === lineup.home.role &&
+              game.away.players === lineup.away.players &&
+              game.home.players === lineup.home.players
+            ) {
+              return game;
+            }
+
+            return {
+              ...game,
+              away: {
+                ...game.away,
+                role: lineup.away.role,
+                players: lineup.away.players,
+              },
+              home: {
+                ...game.home,
+                role: lineup.home.role,
+                players: lineup.home.players,
+              },
+            };
+          }),
+        );
+        setLineupLoadState((currentState) =>
+          currentState?.gameId === selectedGame.id &&
+          currentState.status === "loaded"
+            ? currentState
+            : { gameId: selectedGame.id, status: "loaded" },
+        );
+      })
+      .catch((error: unknown) => {
+        console.warn(
+          `Could not load the lineup for game ${selectedGame.id}`,
+          error,
+        );
+        if (isMounted) {
+          setLineupLoadState((currentState) =>
+            currentState?.gameId === selectedGame.id &&
+            currentState.status === "error"
+              ? currentState
+              : { gameId: selectedGame.id, status: "error" },
+          );
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+    // The selected event ID determines its teams and lineup; scoreboard status refreshes don't.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedGame.id, lineupRetryKey]);
+
+  const gamePlays = useMemo(
+    () => (playData.gameId === selectedGame.id ? playData.plays : []),
+    [playData, selectedGame.id],
+  );
   const selectedPlayIndex =
     playCursor.gameId === selectedGame.id ? playCursor.index : 0;
   const selectedPlay = gamePlays[selectedPlayIndex];
@@ -1619,7 +1798,8 @@ export default function FieldScreen() {
 
   useEffect(() => {
     let isMounted = true;
-    let previousPlayCount = 0;
+    let isLoading = false;
+    let previousPlays: GamePlay[] = [];
     const isDemoGame = selectedGame.id.startsWith("demo-");
 
     if (isDemoGame) {
@@ -1629,6 +1809,11 @@ export default function FieldScreen() {
     }
 
     const loadPlays = async () => {
+      if (isLoading) {
+        return;
+      }
+
+      isLoading = true;
       try {
         const plays = await getGamePlays(selectedGame.id);
         if (!isMounted) {
@@ -1638,27 +1823,38 @@ export default function FieldScreen() {
         setPlayData({ gameId: selectedGame.id, plays });
         setPlaysLoadedForGameId(selectedGame.id);
         setPlayLoadError(null);
+        const priorPlays = previousPlays;
         setPlayCursor((currentCursor) => {
-          if (previousPlayCount === 0) {
+          if (priorPlays.length === 0) {
             return {
               gameId: selectedGame.id,
               index: Math.max(0, plays.length - 1),
             };
           }
 
-          const currentIndex =
+          const currentPlay =
             currentCursor.gameId === selectedGame.id
-              ? currentCursor.index
-              : previousPlayCount - 1;
+              ? priorPlays[currentCursor.index]
+              : priorPlays[priorPlays.length - 1];
+          const wasFollowingLatest =
+            currentPlay?.id === priorPlays[priorPlays.length - 1]?.id;
+          const currentPlayIndex = currentPlay
+            ? plays.findIndex((play) => play.id === currentPlay.id)
+            : -1;
+
           return {
             gameId: selectedGame.id,
-            index:
-              currentIndex === previousPlayCount - 1
-                ? Math.max(0, plays.length - 1)
-                : Math.min(currentIndex, Math.max(0, plays.length - 1)),
+            index: wasFollowingLatest
+              ? Math.max(0, plays.length - 1)
+              : currentPlayIndex >= 0
+                ? currentPlayIndex
+                : Math.min(
+                    currentCursor.index,
+                    Math.max(0, plays.length - 1),
+                  ),
           };
         });
-        previousPlayCount = plays.length;
+        previousPlays = plays;
       } catch (error) {
         console.warn(
           `Could not load play-by-play for game ${selectedGame.id}`,
@@ -1671,6 +1867,8 @@ export default function FieldScreen() {
             message: "Play-by-play could not be loaded.",
           });
         }
+      } finally {
+        isLoading = false;
       }
     };
 
@@ -1722,18 +1920,49 @@ export default function FieldScreen() {
         }
       }
 
+      const trackedQuarterbacks = new Map<string, string>();
+      for (
+        let playIndex = gamePlays.length - 1;
+        playIndex >= 0;
+        playIndex -= 1
+      ) {
+        for (const participant of gamePlays[playIndex].participants) {
+          const rosterEntry = athleteById.get(participant.athleteId);
+          const teamId = rosterEntry?.team.id;
+          if (
+            teamId &&
+            !trackedQuarterbacks.has(teamId) &&
+            rosterEntry.athlete.position?.abbreviation?.toUpperCase() === "QB"
+          ) {
+            trackedQuarterbacks.set(teamId, participant.athleteId);
+          }
+        }
+        if (trackedQuarterbacks.size === 2) {
+          break;
+        }
+      }
+
       const participantIds = new Set(
         selectedPlay.participants.map((participant) => participant.athleteId),
       );
-      const getPriorityIds = (team: TeamInfo, roster: RosterAthlete[]) =>
-        new Set([
-          ...team.players.map((player) =>
+      const getPriorityIds = (team: TeamInfo) =>
+        new Set(
+          team.players.map((player) =>
             player.id.slice(player.id.indexOf("-") + 1),
           ),
-          ...roster.flatMap((athlete) =>
+        );
+      const getPreferredPlayerIds = (roster: RosterAthlete[]) =>
+        new Set(
+          roster.flatMap((athlete) =>
             athlete.id && participantIds.has(athlete.id) ? [athlete.id] : [],
           ),
-        ]);
+        );
+      const getTrackedQuarterbackIds = (teamId: string | undefined) => {
+        const quarterbackId = teamId
+          ? trackedQuarterbacks.get(teamId)
+          : undefined;
+        return new Set(quarterbackId ? [quarterbackId] : []);
+      };
       const awayIsOffense = awayTeamId === selectedPlay.offenseTeamId;
       const awaySpots = awayIsOffense
         ? offenseFormations[0]
@@ -1746,8 +1975,10 @@ export default function FieldScreen() {
         selectFormationPlayers(
           awayRoster,
           awaySpots,
-          getPriorityIds(selectedGame.away, awayRoster),
+          getPriorityIds(selectedGame.away),
           new Set(),
+          getPreferredPlayerIds(awayRoster),
+          getTrackedQuarterbackIds(awayTeamId),
         ),
         awaySpots,
         selectedGame.away,
@@ -1757,8 +1988,10 @@ export default function FieldScreen() {
         selectFormationPlayers(
           homeRoster,
           homeSpots,
-          getPriorityIds(selectedGame.home, homeRoster),
+          getPriorityIds(selectedGame.home),
           new Set(),
+          getPreferredPlayerIds(homeRoster),
+          getTrackedQuarterbackIds(homeTeamId),
         ),
         homeSpots,
         selectedGame.home,
@@ -1780,14 +2013,32 @@ export default function FieldScreen() {
           return [
             {
               id: participant.athleteId,
-              name:
-                rosterEntry.athlete.displayName ??
+              name: rosterEntry.athlete.displayName ??
                 rosterEntry.athlete.fullName ??
                 "Unknown player",
-              position: rosterEntry.athlete.position?.abbreviation ?? "ATH",
+              position:
+                rosterEntry.athlete.position?.abbreviation ?? "ATH",
+              jersey: String(rosterEntry.athlete.jersey ?? "00"),
               teamId: rosterEntry.team.id,
               role: participant.role,
               color: rosterEntry.team.color,
+              player: {
+                id: `${rosterEntry.team.abbreviation}-${participant.athleteId}`,
+                name:
+                  rosterEntry.athlete.displayName ??
+                  rosterEntry.athlete.fullName ??
+                  "Unknown player",
+                position:
+                  rosterEntry.athlete.position?.abbreviation ?? "ATH",
+                jersey: String(rosterEntry.athlete.jersey ?? "00"),
+                x: 0,
+                y: 0,
+                color: rosterEntry.team.color,
+                info: `${rosterEntry.athlete.position?.abbreviation ?? "ATH"} for the ${rosterEntry.team.name}.`,
+                imageUrl:
+                  rosterEntry.athlete.headshot?.href ??
+                  `https://a.espncdn.com/i/headshots/nfl/players/full/${participant.athleteId}.png`,
+              },
             },
           ];
         }),
@@ -1811,24 +2062,58 @@ export default function FieldScreen() {
     return () => {
       isMounted = false;
     };
-  }, [selectedGame.away, selectedGame.home, selectedPlay]);
+  }, [gamePlays, selectedGame.away, selectedGame.home, selectedPlay]);
 
   const offenseIsAway =
     selectedPlay?.offenseTeamId !== undefined &&
     selectedPlay.offenseTeamId === selectedGame.away.id;
+  const fieldOffenseIsAway =
+    selectedPlay && selectedPlay.period > 0
+      ? selectedPlay.period % 2 === 0
+        ? offenseIsAway
+        : !offenseIsAway
+      : !offenseIsAway;
+  const fieldLeftTeam =
+    selectedPlay && selectedGame.away.id && selectedGame.home.id
+      ? fieldOffenseIsAway
+        ? selectedGame.away.id === selectedPlay.offenseTeamId
+          ? selectedGame.home
+          : selectedGame.away
+        : selectedGame.away.id === selectedPlay.offenseTeamId
+          ? selectedGame.away
+          : selectedGame.home
+      : selectedGame.away;
+  const fieldRightTeam =
+    fieldLeftTeam.id === selectedGame.away.id
+      ? selectedGame.home
+      : selectedGame.away;
   const playStartX = selectedPlay
     ? getFieldXFromYardsToEndzone(
         selectedPlay.start?.yardsToEndzone,
-        offenseIsAway,
+        fieldOffenseIsAway,
       )
     : undefined;
   const playEndX = selectedPlay
     ? getFieldXFromYardsToEndzone(
         selectedPlay.end?.yardsToEndzone,
-        offenseIsAway,
+        fieldOffenseIsAway,
       )
     : undefined;
-  const playBoardDirection = offenseIsAway ? 1 : -1;
+  const playBoardDirection = fieldOffenseIsAway ? 1 : -1;
+  const lineToGainX =
+    playStartX !== undefined &&
+    selectedPlay?.start?.distance !== undefined &&
+    Number.isFinite(selectedPlay.start.distance) &&
+    selectedPlay.start.distance >= 0
+      ? Math.max(
+          100,
+          Math.min(
+            FIELD_WIDTH - 100,
+            playStartX +
+              playBoardDirection * selectedPlay.start.distance * 10,
+          ),
+        )
+      : undefined;
   const playBoardLineX = playStartX ?? FIELD_WIDTH / 2;
   const fieldAwayTeam =
     selectedPlay && playBoardLineups?.playId === selectedPlay.id
@@ -1838,6 +2123,24 @@ export default function FieldScreen() {
     selectedPlay && playBoardLineups?.playId === selectedPlay.id
       ? { ...selectedGame.home, players: playBoardLineups.homePlayers }
       : selectedGame.home;
+  const isPlayerNamedInSelectedPlay = (team: TeamInfo, player: Player) =>
+    playParticipants.some(
+      (participant) =>
+        participant.teamId === team.id &&
+        player.id.endsWith(`-${participant.id}`),
+    );
+  const fieldTeams = [fieldAwayTeam, fieldHomeTeam];
+  const fieldPlayerCount = fieldTeams.reduce(
+    (count, team) => count + team.players.length,
+    0,
+  );
+  const identifiedFieldPlayerCount = fieldTeams.reduce(
+    (count, team) =>
+      count +
+      team.players.filter((player) => isPlayerNamedInSelectedPlay(team, player))
+        .length,
+    0,
+  );
 
   const renderField = () => (
     <Svg
@@ -1881,6 +2184,29 @@ export default function FieldScreen() {
 
       {selectedPlay && playStartX !== undefined ? (
         <G>
+          {lineToGainX !== undefined ? (
+            <G>
+              <Line
+                x1={lineToGainX}
+                y1={0}
+                x2={lineToGainX}
+                y2={FIELD_HEIGHT}
+                stroke="#38bdf8"
+                strokeDasharray="10 8"
+                strokeWidth="5"
+              />
+              <SvgText
+                x={lineToGainX}
+                y={26}
+                fill="#38bdf8"
+                fontSize="15"
+                fontWeight="700"
+                textAnchor="middle"
+              >
+                TO GAIN
+              </SvgText>
+            </G>
+          ) : null}
           <Line
             x1={playStartX}
             y1={0}
@@ -1931,7 +2257,7 @@ export default function FieldScreen() {
         fontWeight="700"
         transform={`rotate(-90 60 ${FIELD_HEIGHT / 2})`}
       >
-        {selectedGame.away.abbreviation}
+        {fieldLeftTeam.abbreviation}
       </SvgText>
 
       <SvgText
@@ -1942,7 +2268,7 @@ export default function FieldScreen() {
         fontWeight="700"
         transform={`rotate(90 ${FIELD_WIDTH - 60} ${FIELD_HEIGHT / 2})`}
       >
-        {selectedGame.home.abbreviation}
+        {fieldRightTeam.abbreviation}
       </SvgText>
 
       {selectedPlay
@@ -2053,12 +2379,8 @@ export default function FieldScreen() {
                   playBoardLineX,
                   playBoardDirection,
                 );
-                const participant = playParticipants.find(
-                  (candidate) =>
-                    candidate.teamId === team.id &&
-                    player.id.endsWith(`-${candidate.id}`),
-                );
-                const shortName = player.name.split(" ").slice(-1)[0];
+                const participant = isPlayerNamedInSelectedPlay(team, player);
+                const tokenRadius = participant ? 21 : 17;
 
                 return (
                   <G
@@ -2074,10 +2396,20 @@ export default function FieldScreen() {
                         : undefined
                     }
                   >
+                    <SvgText
+                      x={x}
+                      y={y - tokenRadius - 7}
+                      fill="white"
+                      fontSize="10"
+                      fontWeight={participant ? "700" : "400"}
+                      textAnchor="middle"
+                    >
+                      {player.name}
+                    </SvgText>
                     <Circle
                       cx={x}
                       cy={y}
-                      r={participant ? 21 : 17}
+                      r={tokenRadius}
                       fill={player.color}
                       stroke={participant ? "#facc15" : team.alternateColor}
                       strokeWidth={participant ? "6" : "3"}
@@ -2086,21 +2418,21 @@ export default function FieldScreen() {
                       x={x}
                       y={y + 4}
                       fill="white"
-                      fontSize="11"
+                      fontSize="12"
                       fontWeight="700"
                       textAnchor="middle"
                     >
-                      {player.position}
+                      {player.jersey}
                     </SvgText>
                     <SvgText
                       x={x}
-                      y={y + 31}
+                      y={y + tokenRadius + 13}
                       fill="white"
-                      fontSize="10"
+                      fontSize="9"
                       fontWeight={participant ? "700" : "400"}
                       textAnchor="middle"
                     >
-                      {shortName}
+                      {player.position}
                     </SvgText>
                   </G>
                 );
@@ -2119,6 +2451,15 @@ export default function FieldScreen() {
                       : undefined
                   }
                 >
+                  <SvgText
+                    x={player.x}
+                    y={player.y - 14 - 7}
+                    fill="white"
+                    fontSize="10"
+                    textAnchor="middle"
+                  >
+                    {player.name}
+                  </SvgText>
                   <Circle
                     cx={player.x}
                     cy={player.y}
@@ -2129,10 +2470,19 @@ export default function FieldScreen() {
                   />
                   <SvgText
                     x={player.x}
-                    y={player.y + 5}
+                    y={player.y + 4}
                     fill="white"
-                    fontSize="10"
+                    fontSize="12"
                     fontWeight="700"
+                    textAnchor="middle"
+                  >
+                    {player.jersey}
+                  </SvgText>
+                  <SvgText
+                    x={player.x}
+                    y={player.y + 14 + 13}
+                    fill="white"
+                    fontSize="9"
                     textAnchor="middle"
                   >
                     {player.position}
@@ -2166,7 +2516,7 @@ export default function FieldScreen() {
             onPress={() => setSelectedGameId(game.id)}
             style={[
               styles.gameChip,
-              game.id === selectedGameId && styles.gameChipActive,
+              game.id === selectedGame.id && styles.gameChipActive,
             ]}
           >
             <View style={styles.gameChipMatchup}>
@@ -2182,22 +2532,28 @@ export default function FieldScreen() {
                 </View>
                 <Text style={styles.gameTeamText} numberOfLines={1}>
                   {game.away.name}
-                  {game.isFinal && game.away.score !== undefined
-                    ? ` ${game.away.score}`
-                    : ""}
                 </Text>
-                <View style={styles.gameChipTeamLogoSlot} />
+                <View style={styles.gameChipScoreSlot}>
+                  {game.away.score !== undefined ? (
+                    <Text style={styles.gameChipScore}>
+                      {game.away.score}
+                    </Text>
+                  ) : null}
+                </View>
               </View>
               <Text style={styles.gameMatchupText}>
                 {game.isFinal ? "Final" : "at"}
               </Text>
               <View style={styles.gameChipTeamRow}>
-                <View style={styles.gameChipTeamLogoSlot} />
+                <View style={styles.gameChipScoreSlot}>
+                  {game.home.score !== undefined ? (
+                    <Text style={styles.gameChipScore}>
+                      {game.home.score}
+                    </Text>
+                  ) : null}
+                </View>
                 <Text style={styles.gameTeamText} numberOfLines={1}>
                   {game.home.name}
-                  {game.isFinal && game.home.score !== undefined
-                    ? ` ${game.home.score}`
-                    : ""}
                 </Text>
                 <View style={styles.gameChipTeamLogoSlot}>
                   {game.home.logoUrl ? (
@@ -2410,9 +2766,16 @@ export default function FieldScreen() {
             ) : playParticipants.length > 0 ? (
               <View style={styles.playParticipantList}>
                 {playParticipants.map((participant) => (
-                  <View
+                  <Pressable
                     key={`${selectedPlay.id}-${participant.id}`}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${participant.name}, number ${participant.jersey}, ${participant.position}, ${
+                      participant.teamId === selectedPlay.offenseTeamId
+                        ? "offense"
+                        : "defense"
+                    }. View player details`}
                     style={styles.playParticipant}
+                    onPress={() => setSelectedPlayer(participant.player)}
                   >
                     <View
                       style={[
@@ -2421,14 +2784,15 @@ export default function FieldScreen() {
                       ]}
                     />
                     <Text style={styles.playParticipantText}>
-                      {participant.position} · {participant.name}
+                      {participant.position} · {participant.name} · #
+                      {participant.jersey}
                     </Text>
                     <Text style={styles.playParticipantSide}>
                       {participant.teamId === selectedPlay.offenseTeamId
                         ? "OFF"
                         : "DEF"}
                     </Text>
-                  </View>
+                  </Pressable>
                 ))}
               </View>
             ) : (
@@ -2452,9 +2816,39 @@ export default function FieldScreen() {
       </View>
 
       <View style={styles.lineupSection}>
-        <Text style={styles.lineupTitle}>Team rosters</Text>
+        <Text style={styles.lineupTitle}>Team Rosters</Text>
+        <Text style={styles.lineupSummary}>
+          {fieldPlayerCount} players shown
+          {selectedPlay
+            ? ` · ${identifiedFieldPlayerCount} identified in this play`
+            : ""}
+        </Text>
+        {fieldPlayerCount === 0 &&
+        !selectedGame.id.startsWith("demo-") &&
+        lineupLoadState?.gameId === selectedGame.id &&
+        lineupLoadState.status === "error" ? (
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => setLineupRetryKey((key) => key + 1)}
+          >
+            <Text style={styles.playActionMuted}>
+              Could not load this game’s lineup. Tap to retry.
+            </Text>
+          </Pressable>
+        ) : fieldPlayerCount === 0 &&
+          !selectedGame.id.startsWith("demo-") &&
+          lineupLoadState?.gameId === selectedGame.id &&
+          lineupLoadState.status === "loaded" ? (
+          <Text style={styles.playActionMuted}>
+            No field lineup is available for this game yet.
+          </Text>
+        ) : fieldPlayerCount === 0 && !selectedGame.id.startsWith("demo-") ? (
+          <Text style={styles.playActionMuted}>
+            Loading lineup for selected game…
+          </Text>
+        ) : null}
         <View style={styles.lineupList}>
-          {[selectedGame.away, selectedGame.home].map((team) => (
+          {fieldTeams.map((team) => (
             <View key={team.abbreviation} style={styles.teamRoster}>
               <View style={styles.teamRosterHeader}>
                 {team.logoUrl ? (
@@ -2465,7 +2859,13 @@ export default function FieldScreen() {
                   />
                 ) : null}
                 <Text style={styles.teamRosterName}>{team.name}</Text>
-                <Text style={styles.teamRosterRole}>{team.role}</Text>
+                <Text style={styles.teamRosterRole}>
+                  {selectedPlay
+                    ? team.id === selectedPlay.offenseTeamId
+                      ? "OFFENSE"
+                      : "DEFENSE"
+                    : team.role}
+                </Text>
               </View>
               {getPlayerGroups(team.players).map((group) => (
                 <View key={group.title} style={styles.playerGroup}>
@@ -2488,6 +2888,12 @@ export default function FieldScreen() {
                   {group.players.map((player) => (
                     <Pressable
                       key={player.id}
+                      accessibilityRole="button"
+                      accessibilityLabel={`${player.name}, number ${player.jersey}, ${player.position}${
+                        isPlayerNamedInSelectedPlay(team, player)
+                          ? ", identified in selected play"
+                          : ""
+                      }`}
                       style={styles.playerRow}
                       onPress={() => setSelectedPlayer(player)}
                     >
@@ -2504,6 +2910,9 @@ export default function FieldScreen() {
                           #{player.jersey}
                         </Text>
                       </Text>
+                      {isPlayerNamedInSelectedPlay(team, player) ? (
+                        <Text style={styles.playerInPlay}>IN PLAY</Text>
+                      ) : null}
                       <Text style={styles.playerPosition}>
                         {player.position}
                       </Text>
@@ -2704,6 +3113,19 @@ const styles = StyleSheet.create({
     height: 28,
     flexShrink: 0,
   },
+  gameChipScoreSlot: {
+    width: 28,
+    minHeight: 28,
+    flexShrink: 0,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  gameChipScore: {
+    color: "#f5f7fb",
+    fontSize: 15,
+    fontWeight: "700",
+    fontVariant: ["tabular-nums"],
+  },
   gameChipTeamLogo: {
     width: 28,
     height: 28,
@@ -2893,6 +3315,11 @@ const styles = StyleSheet.create({
     color: "#f5f7fb",
     fontSize: 18,
     fontWeight: "700",
+  },
+  lineupSummary: {
+    color: "#9fb3c8",
+    fontSize: 12,
+    marginTop: 4,
     marginBottom: 10,
   },
   lineupList: {
@@ -3000,6 +3427,12 @@ const styles = StyleSheet.create({
     color: "#8bbaf1",
     fontSize: 13,
     fontWeight: "700",
+  },
+  playerInPlay: {
+    color: "#facc15",
+    fontSize: 10,
+    fontWeight: "800",
+    marginRight: 10,
   },
   playerPosition: {
     color: "#8bbaf1",
