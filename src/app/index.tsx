@@ -592,7 +592,7 @@ const getGamePlays = async (gameId: string): Promise<GamePlay[]> => {
 
 const getFieldXFromYardsToEndzone = (
   yardsToEndzone: number | undefined,
-  offenseIsAway: boolean,
+  offenseAttacksRight: boolean,
 ): number | undefined => {
   if (
     yardsToEndzone === undefined ||
@@ -603,7 +603,7 @@ const getFieldXFromYardsToEndzone = (
     return undefined;
   }
 
-  return offenseIsAway
+  return offenseAttacksRight
     ? FIELD_WIDTH - 100 - yardsToEndzone * 10
     : 100 + yardsToEndzone * 10;
 };
@@ -1386,6 +1386,18 @@ const positionGroupInfo: Record<
   },
 };
 
+const uniqueGamesById = (games: Game[]): Game[] => {
+  const seenIds = new Set<string>();
+  return games.filter((game) => {
+    if (seenIds.has(game.id)) {
+      return false;
+    }
+
+    seenIds.add(game.id);
+    return true;
+  });
+};
+
 const getScoreboardGames = async (): Promise<Game[]> => {
   const response = await fetch(
     "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard",
@@ -1398,7 +1410,7 @@ const getScoreboardGames = async (): Promise<Game[]> => {
   const events = Array.isArray(data?.events) ? data.events : [];
   const seasonYear = Number(data?.season?.year) || new Date().getFullYear();
 
-  return events.flatMap((event: any) => {
+  return uniqueGamesById(events.flatMap((event: any) => {
     const competition = event.competitions?.[0];
     const competitors = competition?.competitors ?? [];
     const homeCompetitor =
@@ -1472,33 +1484,41 @@ const getScoreboardGames = async (): Promise<Game[]> => {
         ),
       },
     ];
-  });
+  }));
 };
 
 const getInitialAvailableGames = (scoreboardGames: Game[]): Game[] => {
-  if (scoreboardGames.length === 0) {
+  const uniqueScoreboardGames = uniqueGamesById(scoreboardGames);
+  if (uniqueScoreboardGames.length === 0) {
     return demoGames;
   }
 
-  const availableGames = scoreboardGames.slice(0, 7);
-  const baltimoreGame = scoreboardGames.find(
+  const availableGames = uniqueScoreboardGames.slice(0, 7);
+  const baltimoreGame = uniqueScoreboardGames.find(
     (game) => game.away.id === "33" || game.home.id === "33",
   );
   const pittsburghGameIndex = availableGames.findIndex(
     (game) => game.away.id === "23" || game.home.id === "23",
   );
+  const alreadyIncludesBaltimore = availableGames.some(
+    (game) => game.id === baltimoreGame?.id,
+  );
 
-  if (baltimoreGame && pittsburghGameIndex !== -1) {
+  if (
+    baltimoreGame &&
+    !alreadyIncludesBaltimore &&
+    pittsburghGameIndex !== -1
+  ) {
     availableGames[pittsburghGameIndex] = baltimoreGame;
   }
 
   const availableIds = new Set(availableGames.map((game) => game.id));
-  return [
+  return uniqueGamesById([
     ...availableGames,
-    ...scoreboardGames.filter(
+    ...uniqueScoreboardGames.filter(
       (game) => game.isInProgress && !availableIds.has(game.id),
     ),
-  ];
+  ]);
 };
 
 const mergeAvailableGames = (
@@ -1509,8 +1529,11 @@ const mergeAvailableGames = (
     return getInitialAvailableGames(scoreboardGames);
   }
 
-  const gamesById = new Map(scoreboardGames.map((game) => [game.id, game]));
-  const availableGames = currentGames
+  const uniqueScoreboardGames = uniqueGamesById(scoreboardGames);
+  const gamesById = new Map(
+    uniqueScoreboardGames.map((game) => [game.id, game]),
+  );
+  const availableGames = uniqueGamesById(currentGames)
     .filter((game) => !game.id.startsWith("demo-"))
     .map((currentGame) => {
       const updatedGame = gamesById.get(currentGame.id);
@@ -1534,12 +1557,12 @@ const mergeAvailableGames = (
     });
   const availableIds = new Set(availableGames.map((game) => game.id));
 
-  return [
+  return uniqueGamesById([
     ...availableGames,
-    ...scoreboardGames.filter(
+    ...uniqueScoreboardGames.filter(
       (game) => game.isInProgress && !availableIds.has(game.id),
     ),
-  ];
+  ]);
 };
 
 const getGameLineup = (game: Game): Promise<Game> => {
@@ -2067,15 +2090,15 @@ export default function FieldScreen() {
   const offenseIsAway =
     selectedPlay?.offenseTeamId !== undefined &&
     selectedPlay.offenseTeamId === selectedGame.away.id;
-  const fieldOffenseIsAway =
+  const offenseAttacksRight =
     selectedPlay && selectedPlay.period > 0
       ? selectedPlay.period % 2 === 0
-        ? offenseIsAway
-        : !offenseIsAway
-      : !offenseIsAway;
+        ? !offenseIsAway
+        : offenseIsAway
+      : offenseIsAway;
   const fieldLeftTeam =
     selectedPlay && selectedGame.away.id && selectedGame.home.id
-      ? fieldOffenseIsAway
+      ? offenseAttacksRight
         ? selectedGame.away.id === selectedPlay.offenseTeamId
           ? selectedGame.home
           : selectedGame.away
@@ -2090,16 +2113,16 @@ export default function FieldScreen() {
   const playStartX = selectedPlay
     ? getFieldXFromYardsToEndzone(
         selectedPlay.start?.yardsToEndzone,
-        fieldOffenseIsAway,
+        offenseAttacksRight,
       )
     : undefined;
   const playEndX = selectedPlay
     ? getFieldXFromYardsToEndzone(
         selectedPlay.end?.yardsToEndzone,
-        fieldOffenseIsAway,
+        offenseAttacksRight,
       )
     : undefined;
-  const playBoardDirection = fieldOffenseIsAway ? 1 : -1;
+  const playBoardDirection = offenseAttacksRight ? 1 : -1;
   const lineToGainX =
     playStartX !== undefined &&
     selectedPlay?.start?.distance !== undefined &&
